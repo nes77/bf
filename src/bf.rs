@@ -4,13 +4,105 @@ use std::io::Read;
 
 #[derive(Debug, Clone)]
 pub enum Statement {
-    Next,
-    Prev,
-    Inc,
-    Dec,
+    Next(usize),
+    Prev(usize),
+    Inc(u8),
+    Dec(u8),
     Out,
     In,
     Loop(Vec<Statement>)
+}
+
+impl Statement {
+    pub fn is_next(&self) -> bool {
+        matches!(self, Statement::Next(_))
+    }
+
+    pub fn is_prev(&self) -> bool {
+        matches!(self, Statement::Prev(_))
+    }
+
+    pub fn is_inc(&self) -> bool {
+        matches!(self, Statement::Inc(_))
+    }
+
+    pub fn is_dec(&self) -> bool {
+        matches!(self, Statement::Dec(_))
+    }
+}
+
+pub fn optimize(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
+    let mut out = Vec::new();
+    let stmts = stmts.as_ref();
+
+    let mut idx = 0usize;
+    while idx < stmts.len() {
+        if let Statement::Loop(l) = &stmts[idx] {
+            out.push(
+                Statement::Loop(optimize(l))
+            );
+            idx += 1;
+            continue;
+        } else if matches!(&stmts[idx], Statement::In | Statement::Out) {
+            out.push(stmts[idx].clone());
+            idx += 1;
+            continue;
+        }
+
+        {
+            let next_cnt = stmts[idx..].iter()
+                .take_while(|s| s.is_next())
+                .count();
+
+            if next_cnt != 0 {
+                out.push(Statement::Next(next_cnt));
+                idx += next_cnt;
+                continue;
+            }
+        }
+
+        {
+            let prev_cnt = stmts[idx..].iter()
+                .take_while(|s| s.is_prev())
+                .count();
+
+            if prev_cnt != 0 {
+                out.push(Statement::Prev(prev_cnt));
+                idx += prev_cnt;
+                continue;
+            }
+        }
+
+        {
+            let dec_cnt = stmts[idx..].iter()
+                .take_while(|s| s.is_dec())
+                .count();
+
+            if dec_cnt != 0 {
+                out.push(Statement::Dec((dec_cnt % (u8::MAX as usize)) as u8));
+                idx += dec_cnt;
+                continue;
+            }
+
+        }
+
+        {
+            let inc_cnt = stmts[idx..].iter()
+                .take_while(|s| s.is_inc())
+                .count();
+
+            if inc_cnt != 0 {
+                out.push(Statement::Inc((inc_cnt % (u8::MAX as usize)) as u8));
+                idx += inc_cnt;
+                continue;
+            }
+
+        }
+
+    }
+
+    println!("Reduced by {} statements", stmts.len() - out.len());
+    out
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -51,6 +143,17 @@ impl Context {
         }
     }
 
+    pub fn adv(&mut self, a: usize) {
+        self.idx += a;
+        if self.idx >= self.data.len() {
+            self.data.resize(self.idx + 1, 0i8)
+        }
+    }
+
+    pub fn ret(&mut self, a: usize) {
+        self.idx -= a;
+    }
+
     pub fn with_state(v: Vec<i8>) -> Self {
         Context {
             data: v,
@@ -74,11 +177,34 @@ impl Context {
         Ok(())
     }
 
+    pub fn inc_many(&mut self, a: u8) -> Result<(), Error> {
+        if self.idx >= self.data.len() {
+            return Err(OutOfBounds(self.idx))
+        }
+
+        let d = self.data[self.idx] as u8;
+        let d = d.wrapping_add(a);
+
+        self.data[self.idx] = d as i8;
+        Ok(())
+    }
+
     pub fn dec(&mut self) -> Result<(), Error> {
         if self.idx >= self.data.len() {
             return Err(OutOfBounds(self.idx))
         }
         self.data[self.idx] = self.data[self.idx].wrapping_sub(1);
+        Ok(())
+    }
+
+    pub fn dec_many(&mut self, a: u8) -> Result<(), Error> {
+        if self.idx >= self.data.len() {
+            return Err(OutOfBounds(self.idx))
+        }
+        let d = self.data[self.idx] as u8;
+        let d = d.wrapping_sub(a);
+
+        self.data[self.idx] = d as i8;
         Ok(())
     }
 
@@ -105,12 +231,11 @@ impl Context {
     }
 
     pub fn exec(&mut self, s: &Statement) -> Result<(), Error> {
-        // println!("{:?}", &s);
         match s {
-            Statement::Next => Ok(self.next()),
-            Statement::Prev => Ok(self.prev()),
-            Statement::Inc => self.inc(),
-            Statement::Dec => self.dec(),
+            Statement::Next(a) => Ok(self.adv(*a)),
+            Statement::Prev(a) => Ok(self.ret(*a)),
+            Statement::Inc(a) => self.inc_many(*a),
+            Statement::Dec(a) => self.dec_many(*a),
             Statement::Out => self.out(),
             Statement::In => self.inp(),
             Statement::Loop(l) => {
@@ -143,11 +268,30 @@ mod tests {
             data: vec![10, 20]
         };
 
-        let prog = Statement::Loop(vec![Dec, Next, Inc, Prev]);
+        let prog = Statement::Loop(vec![Dec(1), Next(1), Inc(1), Prev(1)]);
 
         ctx.exec(&prog).unwrap();
 
         assert_eq!(ctx.data[1], 30);
+
+    }
+
+    #[test]
+    fn optimized() {
+
+        let mut ctx = Context {
+            idx: 0,
+            data: vec![0, 20]
+        };
+
+        let prog = Statement::Loop(vec![Dec(1), Dec(1), Dec(1), Dec(1), Inc(1), Inc(1), Inc(1), Inc(1), Dec(1)]);
+        let opt = optimize(vec![Inc(1), prog]);
+
+
+
+        ctx.exec_many(&opt).unwrap();
+
+        assert_eq!(ctx.data[0], 0);
 
     }
 

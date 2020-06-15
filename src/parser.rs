@@ -58,19 +58,19 @@ pub fn char_op(s: char, stmt: Statement, i: &str) -> IResult<&str, Statement> {
 }
 
 pub fn inc(i: &str) -> IResult<&str, Statement> {
-    char_op('+', Inc, i)
+    char_op('+', Inc(1), i)
 }
 
 pub fn dec(i: &str) -> IResult<&str, Statement> {
-    char_op('-', Dec, i)
+    char_op('-', Dec(1), i)
 }
 
 pub fn next(i: &str) -> IResult<&str, Statement> {
-    char_op('>', Next, i)
+    char_op('>', Next(1), i)
 }
 
 pub fn prev(i: &str) -> IResult<&str, Statement> {
-    char_op('<', Prev, i)
+    char_op('<', Prev(1), i)
 }
 
 pub fn out(i: &str) -> IResult<&str, Statement> {
