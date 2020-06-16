@@ -10,7 +10,9 @@ pub enum Statement {
     Dec(u8),
     Out,
     In,
-    Loop(Vec<Statement>)
+    Loop(Vec<Statement>),
+    // Indirectly encoded statements
+    Clear // [-], [+]
 }
 
 impl Statement {
@@ -32,6 +34,10 @@ impl Statement {
 }
 
 pub fn optimize(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
+    peephole_optimization(constant_fold(stmts))
+}
+
+pub fn constant_fold(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
     let mut out = Vec::new();
     let stmts = stmts.as_ref();
 
@@ -39,11 +45,11 @@ pub fn optimize(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
     while idx < stmts.len() {
         if let Statement::Loop(l) = &stmts[idx] {
             out.push(
-                Statement::Loop(optimize(l))
+                Statement::Loop(constant_fold(l))
             );
             idx += 1;
             continue;
-        } else if matches!(&stmts[idx], Statement::In | Statement::Out) {
+        } else if matches!(&stmts[idx], Statement::In | Statement::Out | Statement::Clear) {
             out.push(stmts[idx].clone());
             idx += 1;
             continue;
@@ -101,8 +107,23 @@ pub fn optimize(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
 
     }
 
-    println!("Reduced by {} statements", stmts.len() - out.len());
+    // println!("Reduced by {} statements", stmts.len() - out.len());
     out
+}
+
+pub fn peephole_optimization(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
+    stmts.as_ref().iter()
+        .map(|s| {
+            match s {
+                Statement::Loop(l) => {
+                    match l.as_slice() {
+                        [Statement::Dec(1)] | [Statement::Inc(1)] => Statement::Clear,
+                        _ => Statement::Loop(peephole_optimization(l))
+                    }
+                },
+                s => s.clone()
+            }
+        }).collect()
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -151,7 +172,7 @@ impl Context {
     }
 
     pub fn ret(&mut self, a: usize) {
-        self.idx -= a;
+        self.idx = self.idx.saturating_sub(a);
     }
 
     pub fn with_state(v: Vec<i8>) -> Self {
@@ -162,7 +183,7 @@ impl Context {
     }
 
     pub fn prev(&mut self) {
-        self.idx -= 1;
+        self.idx = self.idx.saturating_sub(1);
     }
 
     pub fn data(&self) -> &[i8] {
@@ -170,18 +191,11 @@ impl Context {
     }
 
     pub fn inc(&mut self) -> Result<(), Error> {
-        if self.idx >= self.data.len() {
-            return Err(OutOfBounds(self.idx))
-        }
         self.data[self.idx] = self.data[self.idx].wrapping_add(1);
         Ok(())
     }
 
     pub fn inc_many(&mut self, a: u8) -> Result<(), Error> {
-        if self.idx >= self.data.len() {
-            return Err(OutOfBounds(self.idx))
-        }
-
         let d = self.data[self.idx] as u8;
         let d = d.wrapping_add(a);
 
@@ -190,17 +204,11 @@ impl Context {
     }
 
     pub fn dec(&mut self) -> Result<(), Error> {
-        if self.idx >= self.data.len() {
-            return Err(OutOfBounds(self.idx))
-        }
         self.data[self.idx] = self.data[self.idx].wrapping_sub(1);
         Ok(())
     }
 
     pub fn dec_many(&mut self, a: u8) -> Result<(), Error> {
-        if self.idx >= self.data.len() {
-            return Err(OutOfBounds(self.idx))
-        }
         let d = self.data[self.idx] as u8;
         let d = d.wrapping_sub(a);
 
@@ -209,25 +217,25 @@ impl Context {
     }
 
     pub fn out(&self) -> Result<(), Error> {
-        let d = self.data.get(self.idx);
-        d.ok_or(OutOfBounds(self.idx))
-            .map(|i| print!("{}", *i as u8 as char))
+        let d = self.data[self.idx];
+        print!("{}", d as u8 as char);
+        Ok(())
     }
 
     pub fn inp(&mut self) -> Result<(), Error> {
-        let r = self.data.get_mut(self.idx);
-        r.ok_or(OutOfBounds(self.idx))
-            .and_then(|d| {
-                let mut res = [0u8];
-                io::stdin().read_exact(&mut res).map_err(Error::from)?;
-                *d = res[0] as i8;
-                Ok(())
-            })
+        let r = &mut self.data[self.idx];
+        let mut res = [0u8];
+        io::stdin().read_exact(&mut res).map_err(Error::from)?;
+        *r = res[0] as i8;
+        Ok(())
     }
 
     pub fn cur(&self) -> Result<i8, Error> {
-        self.data.get(self.idx).ok_or(OutOfBounds(self.idx))
-            .map(|i| *i)
+        Ok(self.data[self.idx])
+    }
+
+    pub fn clear(&mut self) {
+        self.data[self.idx] = 0;
     }
 
     pub fn exec(&mut self, s: &Statement) -> Result<(), Error> {
@@ -238,6 +246,7 @@ impl Context {
             Statement::Dec(a) => self.dec_many(*a),
             Statement::Out => self.out(),
             Statement::In => self.inp(),
+            Statement::Clear => Ok(self.clear()),
             Statement::Loop(l) => {
                 while self.cur()? != 0 {
                     l.iter().try_for_each(|s| self.exec(s))?;
@@ -285,7 +294,7 @@ mod tests {
         };
 
         let prog = Statement::Loop(vec![Dec(1), Dec(1), Dec(1), Dec(1), Inc(1), Inc(1), Inc(1), Inc(1), Dec(1)]);
-        let opt = optimize(vec![Inc(1), prog]);
+        let opt = constant_fold(vec![Inc(1), prog]);
 
 
 

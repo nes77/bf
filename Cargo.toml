@@ -16,3 +16,4 @@ nom = "6.0.0-alpha1"
 once_cell = "1.4.0"
 anyhow = "1.0.31"
 stopwatch = "0.0.7"
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "llvm10-0" }
