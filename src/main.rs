@@ -17,6 +17,8 @@ fn main() -> anyhow::Result<()> {
             .required(true))
         .arg(Arg::with_name("optimize")
             .short('o'))
+        .arg(Arg::with_name("opt-bf")
+            .short('b'))
         .arg(Arg::with_name("dump")
             .short('d'))
         .arg(Arg::with_name("jit")
@@ -29,7 +31,7 @@ fn main() -> anyhow::Result<()> {
     let bf_text = bf_chars(&text);
     let sw = stopwatch::Stopwatch::start_new();
     let (_, mut s) = program(&bf_text).expect("Unable to parse");
-    if m.is_present("optimize") {
+    if m.is_present("optimize") || m.is_present("opt-bf") {
         s = optimize(s);
     }
 
@@ -42,7 +44,14 @@ fn main() -> anyhow::Result<()> {
     if m.is_present("jit") {
         println!("Jitting...");
         let ctx = Context::create();
-        let gen = CodeGen::new(&ctx);
+
+        let opt_level = if m.is_present("optimize") {
+            OptimizationLevel::Default
+        } else {
+            OptimizationLevel::None
+        };
+
+        let gen = CodeGen::new(&ctx, opt_level);
         let func = gen.jit_bf(&s).unwrap();
         let passes = PassManager::create(());
 
@@ -54,23 +63,15 @@ fn main() -> anyhow::Result<()> {
             &TargetMachine::get_default_triple(),
             &host,
             &features,
-            OptimizationLevel::Aggressive,
+            opt_level,
             RelocMode::Static,
-            CodeModel::JITDefault
+            CodeModel::JITDefault,
         ).unwrap();
 
-        if m.is_present("optimize") {
-            let pm = PassManagerBuilder::create();
-            pm.set_optimization_level(OptimizationLevel::Default);
-            pm.populate_module_pass_manager(&passes);
-            passes.add_promote_memory_to_register_pass();
-            passes.add_aggressive_inst_combiner_pass();
-            passes.add_loop_vectorize_pass();
-        } else {
-            let pm = PassManagerBuilder::create();
-            pm.set_optimization_level(OptimizationLevel::Less);
-            pm.populate_module_pass_manager(&passes);
-        }
+        let pm = PassManagerBuilder::create();
+        pm.set_optimization_level(opt_level);
+        pm.populate_module_pass_manager(&passes);
+        passes.add_promote_memory_to_register_pass();
 
         let dump = m.is_present("dump");
         if dump {

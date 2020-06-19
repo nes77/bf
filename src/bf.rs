@@ -12,7 +12,11 @@ pub enum Statement {
     In,
     Loop(Vec<Statement>),
     // Indirectly encoded statements
-    Clear // [-], [+]
+    Clear,
+    // [-], [+]
+    // Take value at current position, add it to value at other position
+    AddOffset { mul: i64, offset: usize },
+    SearchZero { stride: isize },
 }
 
 impl Statement {
@@ -89,7 +93,6 @@ pub fn constant_fold(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
                 idx += dec_cnt;
                 continue;
             }
-
         }
 
         {
@@ -102,9 +105,7 @@ pub fn constant_fold(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
                 idx += inc_cnt;
                 continue;
             }
-
         }
-
     }
 
     // println!("Reduced by {} statements", stmts.len() - out.len());
@@ -113,15 +114,18 @@ pub fn constant_fold(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
 
 pub fn peephole_optimization(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
     stmts.as_ref().iter()
-        .map(|s| {
+        .flat_map(|s| {
             match s {
                 Statement::Loop(l) => {
                     match l.as_slice() {
-                        [Statement::Dec(1)] | [Statement::Inc(1)] => Statement::Clear,
-                        _ => Statement::Loop(peephole_optimization(l))
+                        [Statement::Dec(1)] | [Statement::Inc(1)] => vec![Statement::Clear],
+                        [Statement::Dec(1), Statement::Next(n), Statement::Inc(inc), Statement::Prev(m)] if n == m => vec![Statement::AddOffset { mul: *inc as i64, offset: *n }, Statement::Clear],
+                        [Statement::Prev(n)] => vec![Statement::SearchZero { stride: (*n as isize) * -1 }],
+                        [Statement::Next(n)] => vec![Statement::SearchZero { stride: (*n as isize) }],
+                        _ => vec![Statement::Loop(peephole_optimization(l))]
                     }
-                },
-                s => s.clone()
+                }
+                s => vec![s.clone()]
             }
         }).collect()
 }
@@ -131,7 +135,7 @@ pub enum Error {
     #[error("IO error occurred: {0}")]
     IO(#[from] io::Error),
     #[error("Attempted operation out of bounds at idx: {0}")]
-    OutOfBounds(usize)
+    OutOfBounds(usize),
 }
 
 pub fn exec(s: Statement) -> Result<(), Error> {
@@ -149,12 +153,12 @@ pub fn exec_many(s: &[Statement]) -> Result<(), Error> {
 #[derive(Debug)]
 pub struct Context {
     data: Vec<i8>,
-    idx: usize
+    idx: usize,
 }
 
 impl Context {
     pub fn new() -> Self {
-        Context {data: vec![0], idx: 0}
+        Context { data: vec![0], idx: 0 }
     }
 
     pub fn next(&mut self) {
@@ -178,7 +182,7 @@ impl Context {
     pub fn with_state(v: Vec<i8>) -> Self {
         Context {
             data: v,
-            idx: 0
+            idx: 0,
         }
     }
 
@@ -249,18 +253,44 @@ impl Context {
             Statement::Clear => Ok(self.clear()),
             Statement::Loop(l) => {
                 while self.cur()? != 0 {
-                    l.iter().try_for_each(|s| self.exec(s))?;
+                    self.exec_many(l)?;
                 }
 
                 Ok(())
-            },
+            }
+            Statement::AddOffset { mul, offset } => {
+                let mul = *mul;
+                let offset = *offset;
+                let val = (mul * (self.cur()? as i64));
+                self.adv(offset as usize);
+
+                let v = self.cur()? as i64 + val;
+                self.data[self.idx] = v as i8;
+                self.ret(offset as usize);
+
+                Ok(())
+            }
+            Statement::SearchZero { stride } => {
+                while self.cur()? != 0 {
+                    if *stride < 0 {
+                        self.ret((*stride * -1) as usize);
+                    } else {
+                        self.adv(*stride as usize);
+                    }
+                }
+
+                Ok(())
+            }
         }
     }
 
     pub fn exec_many(&mut self, blk: impl AsRef<[Statement]>) -> Result<(), Error> {
         let prog = blk.as_ref();
 
-        prog.iter().try_for_each(|s| self.exec(s))
+        prog.iter().try_for_each(|s| {
+            // println!("{:?}: {}", s, self.idx);
+            self.exec(s)
+        })
     }
 }
 
@@ -271,10 +301,9 @@ mod tests {
 
     #[test]
     fn adder() {
-
         let mut ctx = Context {
             idx: 0,
-            data: vec![10, 20]
+            data: vec![10, 20],
         };
 
         let prog = Statement::Loop(vec![Dec(1), Next(1), Inc(1), Prev(1)]);
@@ -282,26 +311,21 @@ mod tests {
         ctx.exec(&prog).unwrap();
 
         assert_eq!(ctx.data[1], 30);
-
     }
 
     #[test]
     fn optimized() {
-
         let mut ctx = Context {
             idx: 0,
-            data: vec![0, 20]
+            data: vec![0, 20],
         };
 
         let prog = Statement::Loop(vec![Dec(1), Dec(1), Dec(1), Dec(1), Inc(1), Inc(1), Inc(1), Inc(1), Dec(1)]);
         let opt = constant_fold(vec![Inc(1), prog]);
 
 
-
         ctx.exec_many(&opt).unwrap();
 
         assert_eq!(ctx.data[0], 0);
-
     }
-
 }

@@ -35,13 +35,12 @@ pub struct CodeGen<'ctx> {
 }
 
 impl<'ctx> CodeGen<'ctx> {
-
-    pub fn new(ctx: &'ctx Context) -> CodeGen<'ctx> {
+    pub fn new(ctx: &'ctx Context, opt: OptimizationLevel) -> CodeGen<'ctx> {
         let module = ctx.create_module("bf_exec");
         CodeGen {
             context: ctx,
             builder: ctx.create_builder(),
-            execution_engine: module.create_jit_execution_engine(OptimizationLevel::Default).unwrap(),
+            execution_engine: module.create_jit_execution_engine(opt).unwrap(),
             module,
         }
     }
@@ -65,10 +64,16 @@ impl<'ctx> CodeGen<'ctx> {
 
         let data = func.get_nth_param(0)?.into_pointer_value();
         let pos = self.builder.build_alloca(index_type, "pos");
+        let data_array = self.builder.build_array_alloca(i8_type, index_type.const_int(30000, false), "data");
+        let memset_ty = void_type.fn_type(&[data_array.get_type().into(), i8_type.into(), self.context.i32_type().into(), self.context.bool_type().into()], false);
+        self.module.add_function("llvm.memset.p0i8.i32", memset_ty, None);
+        self.builder.build_call(self.module.get_function("llvm.memset.p0i8.i32").unwrap(), &[data_array.into(), i8_type.const_zero().into(), self.context.i32_type().const_int(30000, false).into(), self.context.bool_type().const_zero().into()], "cleardata");
+
         self.builder.build_store(pos, index_type.const_zero());
 
-        stmts.as_ref().iter().for_each(|s| self.compile_stmt(func, data, pos, s));
+        stmts.as_ref().iter().for_each(|s| self.compile_stmt(func, data_array, pos, s));
 
+        self.builder.build_memcpy(data, 1, data_array, 1, index_type.const_int(30000, false));
         self.builder.build_return(None);
 
         unsafe { self.execution_engine.get_function("jit_bf").ok() }
@@ -77,13 +82,14 @@ impl<'ctx> CodeGen<'ctx> {
     fn compile_stmt(&self, func: FunctionValue, data: PointerValue, pos: PointerValue, s: &Statement) {
         let index_type = self.context.ptr_sized_int_type(self.execution_engine.get_target_data(), None);
         let i8_type = self.context.i8_type();
+        let i64_type = self.context.i64_type();
 
         match s {
             Statement::Next(u) => {
                 let cur_val = self.builder.build_load(pos, "cur_pos");
                 let new_val = self.builder.build_int_add(cur_val.into_int_value(), index_type.const_int(*u as u64, false), "new_pos");
                 self.builder.build_store(pos, new_val);
-            },
+            }
             Statement::Prev(u) => {
                 let cur_val = self.builder.build_load(pos, "cur_pos");
                 let f = format!("llvm.usub.sat.{}", index_type.print_to_string().to_string());
@@ -91,35 +97,35 @@ impl<'ctx> CodeGen<'ctx> {
                 let new_val = self.builder.build_call(ssub, &[cur_val, index_type.const_int(*u as u64, false).into()], "new_pos")
                     .try_as_basic_value().left().unwrap().into_int_value();
                 self.builder.build_store(pos, new_val);
-            },
+            }
             Statement::Inc(u) => {
                 let cur_pos = self.builder.build_load(pos, "cur_pos");
                 let loc = unsafe { self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
                 let cur_val = self.builder.build_load(loc, "cur_val");
                 let new_val = self.builder.build_int_add(cur_val.into_int_value(), i8_type.const_int(*u as u64, false), "new_val");
                 self.builder.build_store(loc, new_val);
-            },
+            }
             Statement::Dec(u) => {
                 let cur_pos = self.builder.build_load(pos, "cur_pos");
                 let loc = unsafe { self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
                 let cur_val = self.builder.build_load(loc, "cur_val");
                 let new_val = self.builder.build_int_sub(cur_val.into_int_value(), i8_type.const_int(*u as u64, false).into(), "new_val");
                 self.builder.build_store(loc, new_val);
-            },
+            }
             Statement::Out => {
                 let f = self.module.get_function("write_char").unwrap();
                 let cur_pos = self.builder.build_load(pos, "cur_pos");
-                let loc = unsafe {self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
+                let loc = unsafe { self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
                 let cur_val = self.builder.build_load(loc, "cur_val").into_int_value();
                 self.builder.build_call(f, &[cur_val.into()], "printed");
-            },
+            }
             Statement::In => {
                 let f = self.module.get_function("read_char").unwrap();
                 let cur_pos = self.builder.build_load(pos, "cur_pos");
-                let loc = unsafe {self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
+                let loc = unsafe { self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
                 let new_val = self.builder.build_call(f, &[], "new_val").try_as_basic_value().left().unwrap();
                 self.builder.build_store(loc, new_val);
-            },
+            }
             Statement::Loop(l) => {
                 let loop_bb = self.context.append_basic_block(func, "loop");
                 self.builder.build_unconditional_branch(loop_bb);
@@ -136,12 +142,46 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.build_unconditional_branch(loop_bb);
 
                 self.builder.position_at_end(after_loop);
-            },
+            }
             Statement::Clear => {
                 let cur_pos = self.builder.build_load(pos, "cur_pos");
-                let loc = unsafe {self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
+                let loc = unsafe { self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
                 self.builder.build_store(loc, i8_type.const_zero());
+            }
+            Statement::AddOffset { mul, offset } => {
+                // Load cur val
+                let cur_pos = self.builder.build_load(pos, "cur_pos");
+                let loc = unsafe { self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
+                let cur_val = self.builder.build_load(loc, "cur_val").into_int_value();
+                // Multiply by mul
+                let add_val = self.builder.build_int_s_extend_or_bit_cast(cur_val, i64_type, "add_val");
+                let add_val = self.builder.build_int_mul(add_val, i64_type.const_int(*mul as u64, true), "mul_val");
+                let store_loc = unsafe {self.builder.build_gep(loc, &[index_type.const_int(*offset as u64, false)], "store_pos")};
+                let cur_val = self.builder.build_load(store_loc, "old_val");
+                let cur_val = self.builder.build_int_s_extend_or_bit_cast(cur_val.into_int_value(), i64_type, "old_val");
+                let new_val = self.builder.build_int_add(cur_val, add_val, "new_val");
+                // Store at offset
+                let store_val = self.builder.build_int_truncate_or_bit_cast(new_val, i8_type, "store_size_val");
+                self.builder.build_store(store_loc, store_val);
             },
+            Statement::SearchZero { stride } => {
+                let body = self.context.append_basic_block(func, "search_body");
+                let condition = self.context.append_basic_block(func, "cond_block");
+                let after_loop = self.context.append_basic_block(func, "after_loop");
+                self.builder.build_unconditional_branch(condition);
+                self.builder.position_at_end(condition);
+                let cur_pos = self.builder.build_load(pos, "cur_pos");
+                let loc = unsafe { self.builder.build_gep(data, &[cur_pos.into_int_value()], "data_pos") };
+                let cur_val = self.builder.build_load(loc, "cur_val");
+                let comp = self.builder.build_int_compare(IntPredicate::NE, cur_val.into_int_value(), i8_type.const_zero(), "comp");
+                self.builder.build_conditional_branch(comp, body, after_loop);
+                self.builder.position_at_end(body);
+                let old_pos = self.builder.build_load(pos, "cur_pos").into_int_value();
+                let new_pos = self.builder.build_int_add(old_pos, index_type.const_int(*stride as u64, true), "new_pos");
+                self.builder.build_store(pos, new_pos);
+                self.builder.build_unconditional_branch(condition);
+                self.builder.position_at_end(after_loop);
+            }
         }
     }
 }
