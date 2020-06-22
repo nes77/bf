@@ -7,14 +7,27 @@ use bf::jit::CodeGen;
 use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::OptimizationLevel;
 use inkwell::targets::{TargetMachine, Target, InitializationConfig, TargetTriple, RelocMode, CodeModel, FileType};
+use bf::panicking::{StaticContext8, StaticContext16, StaticContext32, StaticContext64};
 
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(not(debug_assertions))]
+    better_panic::install();
+
+    #[cfg(debug_assertions)]
+    better_panic::debug_install();
+
     let m = App::new("bf")
         .arg(Arg::with_name("source-file")
             .value_name("SOURCE")
             .index(1)
             .required(true))
+        .arg(Arg::with_name("cell-size")
+            .short('c')
+            .possible_values(&["i8", "i16", "i32", "i64"])
+            .takes_value(true)
+            .default_value("i8")
+            .conflicts_with("jit"))
         .arg(Arg::with_name("optimize")
             .short('o'))
         .arg(Arg::with_name("opt-bf")
@@ -93,7 +106,30 @@ fn main() -> anyhow::Result<()> {
     } else {
         compile = sw.elapsed_ms();
         exec_start = sw.elapsed_ms();
-        exec_many(&s)?;
+        match m.value_of("cell-size").unwrap() {
+            "i8" => {
+                let mut ctx = StaticContext8::new();
+                ctx.exec_many(&s);
+                println!("{:?}", ctx);
+            },
+            "i16" => {
+                let mut ctx = StaticContext16::new();
+                ctx.exec_many(&s);
+                println!("{:?}", ctx);
+            },
+            "i32" => {
+                let mut ctx = StaticContext32::new();
+                ctx.exec_many(&s);
+                println!("{:?}", ctx);
+            },
+            "i64" => {
+                let mut ctx = StaticContext64::new();
+                ctx.exec_many(&s);
+                println!("{:?}", ctx);
+            },
+            _ => unreachable!()
+        }
+
     }
     let exec = sw.elapsed_ms();
     println!("Compilation took {}ms, execution took {}ms", compile, exec - exec_start);

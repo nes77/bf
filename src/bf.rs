@@ -2,12 +2,14 @@ use std::io;
 use crate::bf::Error::OutOfBounds;
 use std::io::Read;
 
+pub mod panicking;
+
 #[derive(Debug, Clone)]
 pub enum Statement {
     Next(usize),
     Prev(usize),
-    Inc(u8),
-    Dec(u8),
+    Inc(u64),
+    Dec(u64),
     Out,
     In,
     Loop(Vec<Statement>),
@@ -89,7 +91,7 @@ pub fn constant_fold(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
                 .count();
 
             if dec_cnt != 0 {
-                out.push(Statement::Dec((dec_cnt % (u8::MAX as usize)) as u8));
+                out.push(Statement::Dec(dec_cnt as u64));
                 idx += dec_cnt;
                 continue;
             }
@@ -101,7 +103,7 @@ pub fn constant_fold(stmts: impl AsRef<[Statement]>) -> Vec<Statement> {
                 .count();
 
             if inc_cnt != 0 {
-                out.push(Statement::Inc((inc_cnt % (u8::MAX as usize)) as u8));
+                out.push(Statement::Inc(inc_cnt as u64));
                 idx += inc_cnt;
                 continue;
             }
@@ -246,8 +248,8 @@ impl Context {
         match s {
             Statement::Next(a) => Ok(self.adv(*a)),
             Statement::Prev(a) => Ok(self.ret(*a)),
-            Statement::Inc(a) => self.inc_many(*a),
-            Statement::Dec(a) => self.dec_many(*a),
+            Statement::Inc(a) => self.inc_many(*a as u8),
+            Statement::Dec(a) => self.dec_many(*a as u8),
             Statement::Out => self.out(),
             Statement::In => self.inp(),
             Statement::Clear => Ok(self.clear()),

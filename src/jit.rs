@@ -73,7 +73,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         stmts.as_ref().iter().for_each(|s| self.compile_stmt(func, data_array, pos, s));
 
-        self.builder.build_memcpy(data, 1, data_array, 1, index_type.const_int(30000, false));
+        self.builder.build_memcpy(data, 1, data_array, 1, index_type.const_int(30000, false)).unwrap();
         self.builder.build_return(None);
 
         unsafe { self.execution_engine.get_function("jit_bf").ok() }
