@@ -3,7 +3,7 @@ use std::io::{stdin, Read};
 use bf::parser::{bf_chars, program};
 use bf::{exec_many, optimize};
 use inkwell::context::Context;
-use bf::jit::CodeGen;
+use bf::jit::{CodeGen, NUM_CELLS};
 use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::OptimizationLevel;
 use inkwell::targets::{TargetMachine, Target, InitializationConfig, TargetTriple, RelocMode, CodeModel, FileType};
@@ -27,7 +27,11 @@ fn main() -> anyhow::Result<()> {
             .possible_values(&["i8", "i16", "i32", "i64"])
             .takes_value(true)
             .default_value("i8")
-            .conflicts_with("jit"))
+            .required(false)
+            .conflicts_with_all(&["jit", "native"]))
+        .arg(Arg::with_name("native")
+            .short('n')
+            .conflicts_with_all(&["cell-size", "jit"]))
         .arg(Arg::with_name("optimize")
             .short('o'))
         .arg(Arg::with_name("opt-bf")
@@ -54,8 +58,8 @@ fn main() -> anyhow::Result<()> {
     }
     let exec_start;
 
-    if m.is_present("jit") {
-        println!("Jitting...");
+    if m.is_present("jit") || m.is_present("native") {
+
         let ctx = Context::create();
 
         let opt_level = if m.is_present("optimize") {
@@ -65,44 +69,46 @@ fn main() -> anyhow::Result<()> {
         };
 
         let gen = CodeGen::new(&ctx, opt_level);
-        let func = gen.jit_bf(&s).unwrap();
-        let passes = PassManager::create(());
-
-        Target::initialize_all(&InitializationConfig::default());
-        let target = Target::from_triple(&TargetMachine::get_default_triple()).unwrap();
-        let host = TargetMachine::get_host_cpu_name().to_string();
-        let features = TargetMachine::get_host_cpu_features().to_string();
-        let tm = target.create_target_machine(
-            &TargetMachine::get_default_triple(),
-            &host,
-            &features,
-            opt_level,
-            RelocMode::Static,
-            CodeModel::JITDefault,
-        ).unwrap();
-
-        let pm = PassManagerBuilder::create();
-        pm.set_optimization_level(opt_level);
-        pm.populate_module_pass_manager(&passes);
-        passes.add_promote_memory_to_register_pass();
+        if m.is_present("jit") {
+            println!("Jitting...");
+            let func = gen.jit_bf(&s).unwrap();
+            compile = sw.elapsed_ms();
+            let mut ctx = [0i8; NUM_CELLS];
+            let p = ctx.as_mut_ptr();
+            println!("EXECUTING JIT!");
+            exec_start = sw.elapsed_ms();
+            unsafe { func.call(p); }
+            println!();
+            println!("{:?}", &ctx[..16]);
+        } else {
+            let fname = format!("./{}.o", f);
+            println!("Compiling to object file {}", fname);
+            gen.lower_bf(false, &s);
+            gen.add_main();
+            gen.create_object_file(&fname, opt_level);
+            compile = sw.elapsed_ms();
+            exec_start = sw.elapsed_ms();
+        }
 
         let dump = m.is_present("dump");
         if dump {
-            gen.module.print_to_file(format!("./{}.unopt.ir", f)).unwrap();
-        }
-        if passes.run_on(&gen.module) && dump {
             gen.module.print_to_file(format!("./{}.opt.ir", f)).unwrap();
             let asm_dest = format!("./{}.opt.S", f);
+            Target::initialize_all(&InitializationConfig::default());
+            let target = Target::from_triple(&TargetMachine::get_default_triple()).unwrap();
+            let host = TargetMachine::get_host_cpu_name().to_string();
+            let features = TargetMachine::get_host_cpu_features().to_string();
+            let tm = target.create_target_machine(
+                &TargetMachine::get_default_triple(),
+                &host,
+                &features,
+                opt_level,
+                RelocMode::Static,
+                CodeModel::JITDefault,
+            ).unwrap();
             tm.write_to_file(&gen.module, FileType::Assembly, asm_dest.as_ref()).unwrap();
         }
-        compile = sw.elapsed_ms();
-        let mut ctx = [0i8; 30000];
-        let p = ctx.as_mut_ptr();
-        println!("EXECUTING JIT!");
-        exec_start = sw.elapsed_ms();
-        unsafe { func.call(p); }
-        println!();
-        println!("{:?}", &ctx[..16]);
+
     } else {
         compile = sw.elapsed_ms();
         exec_start = sw.elapsed_ms();

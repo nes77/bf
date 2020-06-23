@@ -19,3 +19,4 @@ stopwatch = "0.0.7"
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "llvm10-0" }
 num-traits = "0.2.12"
 better-panic = "0.2.0"
+bfrt = { path = "../bfrt" }

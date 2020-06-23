@@ -1,37 +1,28 @@
 use std::io::{stdin, Read};
 use std::process::abort;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::module::{Module, Linkage};
 use inkwell::builder::Builder;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use crate::Statement;
 use inkwell::values::{AggregateValue, ArrayValue, PointerValue, FunctionValue};
 use inkwell::{AddressSpace, OptimizationLevel, IntPredicate};
-use inkwell::passes::PassManagerSubType;
+use inkwell::passes::{PassManagerSubType, PassManager, PassManagerBuilder};
 
-#[no_mangle]
-pub extern fn write_char(i: i8) {
-    print!("{}", i as u8 as char);
-}
-
-#[no_mangle]
-pub extern fn read_char() -> i8 {
-    let mut buf = [0u8];
-    if let Err(e) = stdin().read_exact(&mut buf) {
-        eprintln!("{}", e);
-        abort();
-    };
-
-    buf[0] as i8
-}
+use bfrt::{read_char, write_char};
+use std::path::Path;
+use inkwell::targets::{Target, TargetMachine, RelocMode, CodeModel, FileType};
 
 pub type BFExecFn = unsafe extern "C" fn(*mut i8) -> ();
+
+pub const NUM_CELLS: usize = 64 * 1024;
 
 pub struct CodeGen<'ctx> {
     pub context: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
     pub execution_engine: ExecutionEngine<'ctx>,
+    opt_level: OptimizationLevel
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -42,29 +33,41 @@ impl<'ctx> CodeGen<'ctx> {
             builder: ctx.create_builder(),
             execution_engine: module.create_jit_execution_engine(opt).unwrap(),
             module,
+            opt_level: opt
         }
     }
 
     pub fn jit_bf(&self, stmts: impl AsRef<[Statement]>) -> Option<JitFunction<BFExecFn>> {
+        if unsafe { self.execution_engine.get_function::<BFExecFn>("jit_bf") }.is_err() {
+            self.lower_bf(true, stmts);
+        }
+        unsafe { self.execution_engine.get_function("jit_bf").ok() }
+    }
+
+    pub fn lower_bf(&self, jit: bool, stmts: impl AsRef<[Statement]>) -> Option<()> {
         let i8_type = self.context.i8_type();
         let void_type = self.context.void_type();
         let index_type = self.context.ptr_sized_int_type(self.execution_engine.get_target_data(), None);
         let fn_type = void_type.fn_type(&[i8_type.ptr_type(AddressSpace::Generic).into()], false);
-        let func = self.module.add_function("jit_bf", fn_type, None);
+        let name = if jit { "jit_bf" } else { "bf_main" };
+        let func = self.module.add_function(name, fn_type, None);
 
         let writef = self.module.add_function("write_char", void_type.fn_type(&[i8_type.into()], false), None);
         let readf = self.module.add_function("read_char", i8_type.fn_type(&[], false), None);
+        if jit {
+            self.execution_engine.add_global_mapping(&writef, write_char as usize);
+            self.execution_engine.add_global_mapping(&readf, read_char as usize);
+        }
+
         let f = format!("llvm.usub.sat.{}", index_type.print_to_string().to_string());
         let _ = self.module.add_function(&f, index_type.fn_type(&[index_type.into(), index_type.into()], false), None);
-        self.execution_engine.add_global_mapping(&writef, write_char as usize);
-        self.execution_engine.add_global_mapping(&readf, read_char as usize);
 
         let entry = self.context.append_basic_block(func, "entry");
         self.builder.position_at_end(entry);
 
         let data = func.get_nth_param(0)?.into_pointer_value();
         let pos = self.builder.build_alloca(index_type, "pos");
-        let data_array = self.builder.build_array_alloca(i8_type, index_type.const_int(30000, false), "data");
+        let data_array = self.builder.build_array_alloca(i8_type, index_type.const_int(NUM_CELLS as u64, false), "data");
         let memset_ty = void_type.fn_type(&[data_array.get_type().into(), i8_type.into(), self.context.i32_type().into(), self.context.bool_type().into()], false);
         self.module.add_function("llvm.memset.p0i8.i32", memset_ty, None);
         self.builder.build_call(self.module.get_function("llvm.memset.p0i8.i32").unwrap(), &[data_array.into(), i8_type.const_zero().into(), self.context.i32_type().const_int(30000, false).into(), self.context.bool_type().const_zero().into()], "cleardata");
@@ -73,10 +76,16 @@ impl<'ctx> CodeGen<'ctx> {
 
         stmts.as_ref().iter().for_each(|s| self.compile_stmt(func, data_array, pos, s));
 
-        self.builder.build_memcpy(data, 1, data_array, 1, index_type.const_int(30000, false)).unwrap();
+        self.builder.build_memcpy(data, 1, data_array, 1, index_type.const_int(NUM_CELLS as u64, false)).unwrap();
         self.builder.build_return(None);
 
-        unsafe { self.execution_engine.get_function("jit_bf").ok() }
+        let passes = PassManager::create(());
+        let pm = PassManagerBuilder::create();
+        pm.set_optimization_level(self.opt_level);
+        pm.populate_module_pass_manager(&passes);
+        passes.add_promote_memory_to_register_pass();
+        passes.run_on(&self.module);
+        Some(())
     }
 
     fn compile_stmt(&self, func: FunctionValue, data: PointerValue, pos: PointerValue, s: &Statement) {
@@ -183,5 +192,32 @@ impl<'ctx> CodeGen<'ctx> {
                 self.builder.position_at_end(after_loop);
             }
         }
+    }
+
+    pub fn add_main(&self) {
+        let i32_type = self.context.i32_type();
+        let i8_type = self.context.i8_type();
+        let main_ftype = i32_type.fn_type(&[], false);
+        let func = self.module.add_function("main", main_ftype, None);
+        let entry = self.context.append_basic_block(func, "entry");
+        self.builder.position_at_end(entry);
+        let out = self.builder.build_array_alloca(i8_type, i32_type.const_int(NUM_CELLS as u64, false), "contents");
+        self.builder.build_call(self.module.get_function("bf_main").unwrap(), &[out.into()], "e");
+        self.builder.build_return(Some(&i32_type.const_zero()));
+    }
+
+    pub fn create_object_file(&self, p: impl AsRef<Path>, opt_level: OptimizationLevel) {
+        let target = Target::from_triple(&TargetMachine::get_default_triple()).unwrap();
+        let host = TargetMachine::get_host_cpu_name().to_string();
+        let features = TargetMachine::get_host_cpu_features().to_string();
+        let tm = target.create_target_machine(
+            &TargetMachine::get_default_triple(),
+            &host,
+            &features,
+            opt_level,
+            RelocMode::Default,
+            CodeModel::Default,
+        ).unwrap();
+        tm.write_to_file(&self.module, FileType::Object, p.as_ref()).unwrap()
     }
 }
